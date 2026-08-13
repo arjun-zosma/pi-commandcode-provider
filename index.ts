@@ -30,11 +30,12 @@ const MODELS_URL = process.env.COMMANDCODE_MODELS_URL ?? DEFAULT_MODELS_URL
 const API_KEY_CONFIG = getConfiguredApiKey() ?? "$COMMANDCODE_API_KEY"
 const SUPPORTED_INPUTS: ("text" | "image")[] = ["text", "image"]
 
+// Zero data retention is ON by default. Set COMMANDCODE_ZDR=0 to start with it
+// disabled, or flip it at runtime with /commandcode-zdr.
+let zdrEnabled = process.env.COMMANDCODE_ZDR !== "0"
+
 function commandCodeHeaders(): Record<string, string> | undefined {
-  if (process.env.COMMANDCODE_ZDR === "1") {
-    return { "x-cmd-zdr": "1" }
-  }
-  return undefined
+  return zdrEnabled ? { "x-cmd-zdr": "1" } : undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -43,39 +44,66 @@ function commandCodeHeaders(): Record<string, string> | undefined {
 
 export default async function (pi: ExtensionAPI) {
   const models = await fetchCommandCodeModels({ url: MODELS_URL })
-  const headers = commandCodeHeaders()
 
-  pi.registerProvider("commandcode", {
-    name: "Command Code",
-    baseUrl: API_BASE,
-    apiKey: API_KEY_CONFIG,
-    api: "openai-completions",
-    headers,
-    oauth: {
+  const registerProvider = () => {
+    const headers = commandCodeHeaders()
+    pi.registerProvider("commandcode", {
       name: "Command Code",
-      login,
-      refreshToken,
-      getApiKey,
-    },
-    models: models.map((model) => ({
-      id: model.id,
-      name: model.name,
-      api: model.api,
-      baseUrl: baseUrlForModel(API_BASE, model.api),
-      reasoning: model.reasoning,
-      input: SUPPORTED_INPUTS,
-      cost: MODEL_COSTS[model.id] ?? ZERO_MODEL_COST,
-      contextWindow: model.contextWindow,
-      maxTokens: model.maxTokens,
+      baseUrl: API_BASE,
+      apiKey: API_KEY_CONFIG,
+      api: "openai-completions",
       headers,
-      compat:
-        model.api === "openai-completions"
-          ? {
-              supportsStore: false,
-              supportsDeveloperRole: false,
-              maxTokensField: "max_tokens",
-            }
-          : undefined,
-    })),
+      oauth: {
+        name: "Command Code",
+        login,
+        refreshToken,
+        getApiKey,
+      },
+      models: models.map((model) => ({
+        id: model.id,
+        name: model.name,
+        api: model.api,
+        baseUrl: baseUrlForModel(API_BASE, model.api),
+        reasoning: model.reasoning,
+        input: SUPPORTED_INPUTS,
+        cost: MODEL_COSTS[model.id] ?? ZERO_MODEL_COST,
+        contextWindow: model.contextWindow,
+        maxTokens: model.maxTokens,
+        headers,
+        compat:
+          model.api === "openai-completions"
+            ? {
+                supportsStore: false,
+                supportsDeveloperRole: false,
+                maxTokensField: "max_tokens",
+              }
+            : undefined,
+      })),
+    })
+  }
+
+  registerProvider()
+
+  pi.registerCommand("commandcode-zdr", {
+    description: "Toggle zero data retention mode for Command Code",
+    handler: (_args, ctx) => {
+      zdrEnabled = !zdrEnabled
+      registerProvider()
+      ctx.ui.notify(
+        `Command Code zero data retention: ${zdrEnabled ? "ON" : "OFF"} (x-cmd-zdr: ${zdrEnabled ? "1" : "unset"})`,
+        "info",
+      )
+    },
+  })
+
+  pi.on("message_end", (event, ctx) => {
+    if (event.message.role !== "assistant") return
+    const errorMessage = "errorMessage" in event.message ? event.message.errorMessage : undefined
+    if (!errorMessage) return
+    if (!/zero.data.retention|cmd_zdr_no_providers|cmd-zdr-no-providers/i.test(errorMessage)) return
+    ctx.ui.notify(
+      `This Command Code model has no zero-data-retention upstream. Run /commandcode-zdr to disable ZDR for it.`,
+      "warning",
+    )
   })
 }
