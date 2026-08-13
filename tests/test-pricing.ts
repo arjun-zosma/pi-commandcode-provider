@@ -1,85 +1,177 @@
 import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
 import { describe, it } from "node:test"
 
-import { MODEL_COSTS } from "../src/pricing.ts"
+import {
+  MODEL_COSTS,
+  PRICING_LAST_VERIFIED,
+  PRICING_SOURCE_URL,
+  TEMPORARY_PRICING,
+} from "../src/pricing.ts"
 
-const CURRENT_PROVIDER_MODELS = [
-  "claude-sonnet-5",
-  "claude-sonnet-4-6",
-  "claude-fable-5",
-  "claude-opus-4-8",
-  "claude-opus-4-7",
-  "claude-haiku-4-5-20251001",
-  "gpt-5.5",
-  "gpt-5.4",
-  "gpt-5.3-codex",
-  "gpt-5.4-mini",
-  "deepseek/deepseek-v4-pro",
-  "deepseek/deepseek-v4-flash",
-  "moonshotai/Kimi-K2.7-Code",
-  "moonshotai/Kimi-K2.7-Code-Highspeed",
-  "moonshotai/Kimi-K2.6",
-  "moonshotai/Kimi-K2.5",
-  "zai-org/GLM-5.2",
-  "zai-org/GLM-5.2-Fast",
-  "zai-org/GLM-5.1",
-  "zai-org/GLM-5",
-  "MiniMaxAI/MiniMax-M3",
-  "MiniMaxAI/MiniMax-M2.7",
-  "MiniMaxAI/MiniMax-M2.5",
-  "xiaomi/mimo-v2.5-pro",
-  "xiaomi/mimo-v2.5",
-  "Qwen/Qwen3.6-Max-Preview",
-  "Qwen/Qwen3.6-Plus",
-  "Qwen/Qwen3.7-Max",
-  "Qwen/Qwen3.7-Plus",
-  "stepfun/Step-3.7-Flash",
-  "stepfun/Step-3.5-Flash",
-  "google/gemini-3.5-flash",
-  "google/gemini-3.1-flash-lite",
-  "sakana/fugu-ultra",
-  "nvidia/nemotron-3-ultra-550b-a55b",
-]
+interface ModelCatalogSnapshot {
+  fetchedAt: string
+  source: string
+  modelIds: string[]
+}
+
+interface PricingSnapshot {
+  verifiedAt: string
+  source: string
+  tierPolicy: string
+  tiers: Record<string, [number, number, number, number, number][]>
+  costs: Record<string, [number, number, number, number]>
+}
+
+const fixtureUrl = new URL("./fixtures/commandcode-model-ids.json", import.meta.url)
+const fixture = JSON.parse(await readFile(fixtureUrl, "utf-8")) as ModelCatalogSnapshot
+const pricingFixtureUrl = new URL("./fixtures/commandcode-pricing.json", import.meta.url)
+const pricingFixture = JSON.parse(await readFile(pricingFixtureUrl, "utf-8")) as PricingSnapshot
+const freeModels = new Set(["poolside/laguna-s-2.1-free", "inclusionai/ling-3.0-flash-free"])
+
+function assertCost(
+  modelId: string,
+  expected: { input: number; output: number; cacheRead: number; cacheWrite: number },
+) {
+  const cost = MODEL_COSTS[modelId]
+  assert.ok(cost, `${modelId} should have pricing`)
+  assert.deepEqual(
+    {
+      input: cost.input,
+      output: cost.output,
+      cacheRead: cost.cacheRead,
+      cacheWrite: cost.cacheWrite,
+    },
+    expected,
+    `${modelId} base pricing should match the source`,
+  )
+}
 
 describe("MODEL_COSTS pricing overlay", () => {
-  it("covers the validated Provider API model catalog with non-zero display pricing", () => {
-    for (const id of CURRENT_PROVIDER_MODELS) {
-      const cost = MODEL_COSTS[id]
-      assert.ok(cost, `MODEL_COSTS should include "${id}"`)
-      assert.ok(cost.input > 0, `"${id}" input cost should be > 0`)
-      assert.ok(cost.output > 0, `"${id}" output cost should be > 0`)
+  it("covers the current Command Code model catalog snapshot", () => {
+    assert.equal(fixture.source, "https://api.commandcode.ai/provider/v1/models")
+    assert.match(fixture.fetchedAt, /^2026-08-04T/)
+
+    const catalogIds = [...fixture.modelIds].sort()
+    const pricedIds = Object.keys(MODEL_COSTS).sort()
+    assert.deepEqual(pricedIds, catalogIds)
+  })
+
+  it("matches the verified official pricing snapshot", () => {
+    assert.equal(pricingFixture.verifiedAt, PRICING_LAST_VERIFIED)
+    assert.equal(pricingFixture.source, PRICING_SOURCE_URL)
+    assert.match(pricingFixture.tierPolicy, /request-wide input tiers/)
+
+    const expected = Object.fromEntries(
+      Object.entries(pricingFixture.costs).map(
+        ([modelId, [input, output, cacheRead, cacheWrite]]) => [
+          modelId,
+          {
+            input,
+            output,
+            cacheRead,
+            cacheWrite,
+            ...(pricingFixture.tiers[modelId]
+              ? {
+                  tiers: pricingFixture.tiers[modelId].map(
+                    ([inputTokensAbove, tierInput, tierOutput, tierCacheRead, tierCacheWrite]) => ({
+                      inputTokensAbove,
+                      input: tierInput,
+                      output: tierOutput,
+                      cacheRead: tierCacheRead,
+                      cacheWrite: tierCacheWrite,
+                    }),
+                  ),
+                }
+              : {}),
+          },
+        ],
+      ),
+    )
+    assert.deepEqual(MODEL_COSTS, expected)
+  })
+
+  it("uses non-zero prices except for models documented as free", () => {
+    for (const [modelId, cost] of Object.entries(MODEL_COSTS)) {
+      assert.ok(cost.input >= 0, `${modelId} input cost should be non-negative`)
+      assert.ok(cost.output >= 0, `${modelId} output cost should be non-negative`)
+      assert.ok(cost.cacheRead >= 0, `${modelId} cache-read cost should be non-negative`)
+      assert.ok(cost.cacheWrite >= 0, `${modelId} cache-write cost should be non-negative`)
+
+      const allZero = Object.values(cost).every((value) => value === 0)
+      assert.equal(
+        allZero,
+        freeModels.has(modelId),
+        `${modelId} free-model status should be explicit`,
+      )
     }
   })
 
-  it("includes known promotional pricing", () => {
-    assert.deepEqual(MODEL_COSTS["deepseek/deepseek-v4-pro"], {
-      input: 0.435,
-      output: 0.87,
-      cacheRead: 0.003625,
-      cacheWrite: 0,
-    })
-    assert.deepEqual(MODEL_COSTS["MiniMaxAI/MiniMax-M3"], {
-      input: 0.3,
-      output: 1.2,
-      cacheRead: 0.06,
-      cacheWrite: 0,
-    })
-    assert.deepEqual(MODEL_COSTS["xiaomi/mimo-v2.5"], {
+  it("matches corrected official rates", () => {
+    assertCost("deepseek/deepseek-v4-flash", {
       input: 0.14,
       output: 0.28,
       cacheRead: 0.0028,
       cacheWrite: 0,
     })
+    assertCost("Qwen/Qwen3.7-Max", {
+      input: 2.5,
+      output: 7.5,
+      cacheRead: 0.5,
+      cacheWrite: 3.13,
+    })
+    assertCost("xiaomi/mimo-v2.5-pro", {
+      input: 0.435,
+      output: 0.87,
+      cacheRead: 0.0036,
+      cacheWrite: 0,
+    })
+    assertCost("MiniMaxAI/MiniMax-M2.5", {
+      input: 0.3,
+      output: 1.2,
+      cacheRead: 0.03,
+      cacheWrite: 0,
+    })
   })
 
-  it("has cache pricing for Claude models", () => {
-    const claudeModels = ["claude-sonnet-5", "claude-sonnet-4-6", "claude-opus-4-8"]
+  it("uses the documented base rates for context-dependent models", () => {
+    assertCost("Qwen/Qwen3.7-Plus", {
+      input: 0.4,
+      output: 1.6,
+      cacheRead: 0.08,
+      cacheWrite: 0.5,
+    })
+    assertCost("Qwen/Qwen3.7-Flash", {
+      input: 0.03,
+      output: 0.13,
+      cacheRead: 0.006,
+      cacheWrite: 0.038,
+    })
+    assertCost("gpt-5.6-terra", {
+      input: 1,
+      output: 6,
+      cacheRead: 0.1,
+      cacheWrite: 1.25,
+    })
+  })
 
-    for (const id of claudeModels) {
-      const cost = MODEL_COSTS[id]
-      assert.ok(cost, `MODEL_COSTS should include "${id}"`)
-      assert.ok(cost.cacheRead > 0, `"${id}" cacheRead should be > 0`)
-      assert.ok(cost.cacheWrite > 0, `"${id}" cacheWrite should be > 0`)
+  it("tracks pricing provenance", () => {
+    assert.equal(PRICING_SOURCE_URL, "https://commandcode.ai/docs/resources/pricing-limits")
+    assert.equal(PRICING_LAST_VERIFIED, "2026-08-04")
+  })
+
+  it("fails once temporary pricing needs review", () => {
+    const today = new Date().toISOString().slice(0, 10)
+    for (const pricing of TEMPORARY_PRICING) {
+      assert.match(pricing.expiresOn, /^\d{4}-\d{2}-\d{2}$/)
+      assert.ok(pricing.models.length > 0)
+      assert.ok(
+        pricing.expiresOn >= today,
+        `${pricing.description} for ${pricing.models.join(", ")} expired on ${pricing.expiresOn}; refresh MODEL_COSTS`,
+      )
+      for (const modelId of pricing.models) {
+        assert.ok(MODEL_COSTS[modelId], `${modelId} should have a temporary price entry`)
+      }
     }
   })
 })
