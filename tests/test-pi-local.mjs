@@ -407,6 +407,11 @@ try {
   )
   assert.equal(lastRequestBody?.model, TEST_MODEL)
   assert.equal(lastRequestBody?.stream, true)
+  assert.equal(
+    lastRequestHeaders["x-cmd-zdr"],
+    "1",
+    "should send x-cmd-zdr: 1 by default (zero data retention on)",
+  )
 
   console.log("[pi-local] Anthropic Messages route through real extension and mock API")
   anthropicRequestCount = 0
